@@ -5,6 +5,7 @@ import sqlite3
 import requests
 import numpy as np
 import pandas as pd
+import altair as alt
 import streamlit as st
 from io import StringIO
 from datetime import datetime
@@ -24,7 +25,6 @@ try:
     HAS_XGB = True
 except Exception:
     HAS_XGB = False
-
 try:
     from sklearn.ensemble import RandomForestRegressor
     HAS_RF = True
@@ -42,7 +42,6 @@ FORMATIONS = {
 POS_FROM_ID = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
 # --------------- Robust Utilities --------------
-
 def ensure_cache_schema():
     conn = sqlite3.connect(CACHE_DB)
     cur = conn.cursor()
@@ -91,7 +90,6 @@ def safe_request(url, retries=3, backoff=2.0, timeout=20):
                 raise e
 
 # --------------- Data Layer --------------
-
 @st.cache_data(show_spinner=False)
 def fetch_bootstrap_static():
     url = "https://fantasy.premierleague.com/api/bootstrap-static/"
@@ -190,7 +188,6 @@ def compute_features_for_player(row, history_points, horizon_gw=1):
 def build_features_df(players_df, horizon_gw=1):
     """Return a DataFrame of features for each player for ML inference."""
     feats = []
-    targets = []
     for _, row in players_df.iterrows():
         his = fetch_element_history(row["id"])
         feat = compute_features_for_player(row, his, horizon_gw)
@@ -222,7 +219,6 @@ def predict_points_for_player(row, history_points, horizon_gw=1, model_info=None
     return predict_points_for_player_baseline(history_points)
 
 # -------------- Optimization Helpers --------------
-
 def optimize_squad(players_df, pred_points, horizon_gw=1, budget=DEFAULT_BUDGET):
     """
     Stage A: pick 15 players with fixed quotas; 2 GK, 5 DEF, 5 MID, 3 FWD.
@@ -315,7 +311,6 @@ def optimize_starting_11(squad_df, formation="4-4-2", pred_map=None):
     return start_ids, captain_id, bench_ids
 
 # ------------- Chip Planning Module --------------
-
 def plan_chips(squad_df, pred_series, horizon_weeks, formation="4-4-2", budget=DEFAULT_BUDGET):
     """
     Short-horizon chip planning (1-4 weeks).
@@ -330,36 +325,28 @@ def plan_chips(squad_df, pred_series, horizon_weeks, formation="4-4-2", budget=D
     baseline_points = float(np.sum(pred_series))
 
     # 1) Wildcard uplift: re-optimize 15 with same constraints
-    players = squad_df[['id', 'name', 'team_name', 'position', 'price', 'pred']].copy()
-    # We need a full pool to rerun; for MVP, reuse all players in pool
     pool_df = squad_df.copy()
-    # Re-run Stage A optimization with same horizon
-    # (In a full app, we would pull the entire pool; here we reuse current pool for simplicity.)
-    # Use a fixed budget for both to illustrate uplift.
-
     wildcard_squad = optimize_squad(pool_df, pool_df["pred"] if "pred" in pool_df.columns else pred_series, horizon_weeks, budget)
     wildcard_points = float(wildcard_squad["pred"].sum()) if "pred" in wildcard_squad.columns else 0.0
     uplift_wildcard = max(0.0, wildcard_points - baseline_points)
 
-    # 2) Free Hit (emulated): for MVP, assume a fresh 15 for next GW
-    # We will reuse same optimize_squad logic but note it’s for the next GW only
+    # 2) Free Hit (emulated)
     free_hit_squad = optimize_squad(pool_df, pool_df["pred"] if "pred" in pool_df.columns else pred_series, horizon_weeks, budget)
     free_hit_points = float(free_hit_squad["pred"].sum()) if "pred" in free_hit_squad.columns else 0.0
     uplift_free_hit = max(0.0, free_hit_points - baseline_points)
 
-    # 3) Bench Boost: double bench players for the upcoming GW
-    # Get current starting 11 to identify bench
+    # 3) Bench Boost
     top11, captain_id, bench_ids = optimize_starting_11(squad_df, formation)
     bench_points = float(squad_df[squad_df["id"].isin(bench_ids)]["pred"].sum()) if len(bench_ids) > 0 else 0.0
-    uplift_bench_boost = bench_points  # as if bench points are doubled
+    uplift_bench_boost = bench_points  # rough proxy
 
-    # 4) Triple Captain: best captain within starting 11 (or among the whole squad)
+    # 4) Triple Captain
     if "pred" in squad_df.columns:
         captain_candidates = squad_df.sort_values(by="pred", ascending=False).head(11)
         best_captain_pred = captain_candidates["pred"].max() if not captain_candidates.empty else 0.0
     else:
         best_captain_pred = 0.0
-    uplift_triple_captain = best_captain_pred  # additive to baseline
+    uplift_triple_captain = best_captain_pred
 
     chips = [
         {"chip": "Wildcard", "uplift": uplift_wildcard, "reason": "Full squad churn to maximize horizon points."},
@@ -368,7 +355,6 @@ def plan_chips(squad_df, pred_series, horizon_weeks, formation="4-4-2", budget=D
         {"chip": "Triple Captain", "uplift": uplift_triple_captain, "reason": "Triple points for one captain in next GW."},
     ]
 
-    # Pick the best chip by uplift (and keep only positive uplifts)
     best = max(chips, key=lambda c: c["uplift"])
     return {
         "best_chip": best["chip"],
@@ -378,11 +364,9 @@ def plan_chips(squad_df, pred_series, horizon_weeks, formation="4-4-2", budget=D
     }
 
 # ------------- Transfers Plan --------------
-
 def parse_current_squad_csv(csv_text_or_file):
     """Parse a small CSV with fields: id,name,position,team_name,price,pred"""
     if isinstance(csv_text_or_file, str):
-        # CSV text
         df = pd.read_csv(StringIO(csv_text_or_file))
     else:
         df = pd.read_csv(csv_text_or_file)
@@ -409,7 +393,6 @@ def compute_transfers(current_squad_df, target_squad_df, budget=DEFAULT_BUDGET):
     best_transfers = []
     current_cost = sum(current_squad_df["price"].tolist())
 
-    # Brute-force up to 2 transfers (1 or 2 buys)
     from itertools import combinations, product
 
     candidates = list(buys.values())
@@ -419,7 +402,6 @@ def compute_transfers(current_squad_df, target_squad_df, budget=DEFAULT_BUDGET):
     # 1-transfer options
     for b in candidates:
         cost_change = float(b["price"]) - (float(next(iter(sells.values())))["price"] if sells else 0.0)
-        # naive: if there are sells, pair with the worst performing sell
         s_p = max(sells.values(), key=lambda x: x["pred"]) if sells else None
         pred_gain = float(b["pred"]) - (float(s_p["pred"]) if s_p else 0.0)
         new_cost = current_cost + cost_change
@@ -464,7 +446,6 @@ def compute_transfers(current_squad_df, target_squad_df, budget=DEFAULT_BUDGET):
     return top
 
 # ------------- Generative AI Guidance --------------
-
 def ai_guidance(prompt_text, max_tokens=500, model="gpt-5-nano-2025-08-07"):
     """Call OpenAI API if key is provided; otherwise return offline guidance."""
     key = os.environ.get("OPENAI_API_KEY")
@@ -498,10 +479,11 @@ def ai_guidance(prompt_text, max_tokens=500, model="gpt-5-nano-2025-08-07"):
         return "AI guidance failed to fetch (API error). You can still rely on the model's numeric outputs and heuristics."
 
 # ------------- UI + App Logic --------------
-
 def main():
     st.set_page_config(page_title="FPL AI Predictor & Team Optimizer (MVP)", layout="wide")
     st.title("FPL AI Predictor & Team Optimizer (MVP)")
+    # EPL logo header (local or online)
+    st.image("https://upload.wikimedia.org/wikipedia/en/e/e1/Premier_League_Logo.png", width=200)
 
     # 1) Data fetch
     with st.spinner("Fetching latest FPL data (bootstrap-static)…"):
@@ -539,6 +521,8 @@ def main():
             preds.append(pred)
 
     players_df["pred_next_gw"] = preds
+    # Also create a friendly alias for display
+    players_df["PredNextGW"] = players_df["pred_next_gw"]
 
     # Sort by predicted points
     players_df = players_df.sort_values(by="pred_next_gw", ascending=False).reset_index(drop=True)
@@ -549,58 +533,50 @@ def main():
         st.error("Optimization failed to find a valid squad with the current constraints. Try relaxing budget or formation.")
         return
 
-    # Attach predictions to squad
-    squad = squad.copy()
-    if "pred" not in squad.columns:
-        squad["pred"] = squad["pred"] if "pred" in squad.columns else squad["pred_next_gw"]
-
-    # Stage B: Starting XI
+    # 4) Stage B: Starting XI
     start_ids, captain_id, bench_ids = optimize_starting_11(squad, formation)
 
-    # Create display tables
-    squad_display = squad[["id","name","team_name","position","price","pred"]].rename(columns={
-        "id":"ID","name":"Player","team_name":"Club","position":"POS","price":"Price","pred":"PredNextGW"
+    # Display Stage A (squad)
+    squad_display = squad[["id","name","team_name","position","price","pred_next_gw"]].rename(columns={
+        "id":"ID","name":"Player","team_name":"Club","position":"POS","price":"Price","pred_next_gw":"PredNextGW"
     })
     squad_display["Price"] = squad_display["Price"].round(2)
     squad_display["PredNextGW"] = squad_display["PredNextGW"].round(2)
 
-    starting11 = squad[squad["id"].isin(start_ids)].copy()
-    starting11 = starting11.rename(columns={
-        "name":"Player","team_name":"Club","position":"POS","price":"Price","pred":"PredNextGW"
-    })
-    bench = squad[squad["id"].isin(bench_ids)].copy()
-    bench = bench.rename(columns={
-        "name":"Player","team_name":"Club","position":"POS","price":"Price","pred":"PredNextGW"
-    })
-
-    captain_name = squad[squad["id"] == captain_id]["name"].values[0] if captain_id in squad["id"].values else "N/A"
-
     st.header("Stage A: 15-player Squad (MVP)")
-    st.dataframe(squad_display.style.format({"Price": "{:.2f}", "PredNextGW": "{:.2f}"}))
+    st.dataframe(squad_display)
+
+    # Stage B: Starting XI (robust rename first, then display)
+    starting11 = squad[squad["id"].isin(start_ids)].copy()
+    display11 = starting11.rename(columns={
+        "name": "Player",
+        "team_name": "Club",
+        "position": "POS",
+        "price": "Price",
+        "pred_next_gw": "PredNextGW"
+    })
+    starter_display = display11[["id","Player","Club","POS","Price","PredNextGW"]]
+    starter_display["Price"] = starter_display["Price"].astype(float).round(2)
+    starter_display["PredNextGW"] = starter_display["PredNextGW"].astype(float).round(2)
 
     st.markdown("---")
     st.header(f"Stage B: Starting XI ({formation})")
-    if starting11.empty:
+    if starter_display.empty:
         st.warning("Could not form a starting XI with current formation and squad. Check constraints.")
     else:
-        starter_display = starting11[["id","name","team_name","position","price","pred"]].rename(columns={
-            "name":"Player","team_name":"Club","position":"POS","price":"Price","pred":"PredNextGW"
-        })
-        starter_display["Price"] = starter_display["Price"].astype(float).round(2)
-        starter_display["PredNextGW"] = starter_display["PredNextGW"].astype(float).round(2)
         st.dataframe(starter_display)
 
+        captain_name = squad[squad["id"] == captain_id]["name"].values[0] if captain_id in squad["id"].values else "N/A"
         st.subheader("Captain and VC suggestion")
         st.write(f"Captain for this GW (current plan): {captain_name}")
 
     # 4) Chips Advisor (Chip Planning Module)
     st.header("Chips Advisor (Short-horizon planning)")
-    chip_plan = plan_chips(squad, squad["pred"] if "pred" in squad.columns else squad["pred_next_gw"], horizon_gw, formation, budget)
+    chip_plan = plan_chips(squad, squad["pred_next_gw"] if "pred_next_gw" in squad.columns else squad["PredNextGW"], horizon_gw, formation, budget)
     st.write(f"Best chip: {chip_plan['best_chip']}")
     st.write(f"Expected uplift (points): {chip_plan['uplift']:.2f}")
     st.write(f"Reason: {chip_plan['best_reason']}")
     st.write("All options (uplifts):")
-    # Present all options
     opt_df = pd.DataFrame(chip_plan["all_options"])
     if not opt_df.empty:
         opt_df = opt_df[["chip","uplift","reason"]].rename(columns={
@@ -620,9 +596,9 @@ def main():
             st.error("Current squad CSV is invalid. Ensure it has columns: id,name,position,team_name,price,pred")
         else:
             # Build target (MVP) squad as minimal transfer target
-            target_squad_df = squad[["id","name","position","team_name","price","pred"]].copy()
+            target_squad_df = squad[["id","name","position","team_name","price","pred_next_gw"]].copy()
             target_squad_df = target_squad_df.rename(columns={
-                "name":"name","team_name":"team_name","price":"price","pred":"pred","position":"position"
+                "name":"name","team_name":"team_name","price":"price","pred_next_gw":"pred","position":"position"
             })
             transfers = compute_transfers(current_squad_df, target_squad_df)
             if not transfers:
@@ -656,6 +632,17 @@ def main():
     st.write("- The predictor is pluggable: replace the baseline with a trained model (load via models/).")
     st.write("- The chip planner is a short-horizon helper; adapt horizons, rules, and penalties as needed.")
     st.write("- For robust production use, consider more advanced data caching, error handling, and rate-limiting.")
+
+    # Visualization: top 10 players by PredNextGW
+    top10 = players_df.nlargest(10, "PredNextGW")
+    if not top10.empty:
+        vis = top10.rename(columns={"name": "Player"})
+        chart = alt.Chart(vis).mark_bar().encode(
+            x=alt.X("Player:N", sort=None),
+            y="PredNextGW:Q",
+            color="position:N"
+        ).properties(width=700, height=300)
+        st.altair_chart(chart, use_container_width=True)
 
     # Optional: Clear cache button (for testing)
     if st.button("Reset Local Cache"):
