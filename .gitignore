@@ -1,0 +1,69 @@
+# .gitignore for FPL AI Predictor & Team Optimizer (MVP)
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+ENV/
+env/
+,.venv/
+
+# Environment variables / secrets
+.env
+.env.*
+
+# Caches
+.streamlit/
+# Specific local cache DB used by the MVP
+fpl_cache.db
+cache/
+
+# Data/model artifacts
+models/
+
+# Databases (be careful: not all *.db are secrets, but we generally avoid
+# committing local test/db files)
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# Builds / distribution
+build/
+dist/
+*.egg-info/
+
+# Jupyter / notebooks
+.ipynb_checkpoints/
+
+# IDE / Editor folders
+.idea/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Other
+__init__.pyc
+*.pyo
+*.pyd
